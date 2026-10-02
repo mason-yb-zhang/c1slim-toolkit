@@ -13,10 +13,6 @@ adb shell "mkdir -p $APPS/jigsaw/bin $APPS/jigsaw/share"
 adb push jigsaw-pkg/bin-dfrotz "$APPS/jigsaw/bin/dfrotz"
 adb push jigsaw-pkg/share/jigsaw.z8 "$APPS/jigsaw/share/jigsaw.z8"
 
-cat > play.sh <<'EOF'
-#!/bin/sh
-exec /storage/c1/local-apps/apps/jigsaw/bin/dfrotz /storage/c1/local-apps/apps/jigsaw/share/jigsaw.z8
-EOF
 adb push play.sh "$APPS/jigsaw/bin/play.sh"
 
 cat > 11-jigsaw.json <<'EOF'

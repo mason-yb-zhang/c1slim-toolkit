@@ -1,0 +1,1780 @@
+diff --git a/compact.go b/compact.go
+new file mode 100644
+index 0000000..16ca05f
+--- /dev/null
++++ b/compact.go
+@@ -0,0 +1,425 @@
++package main
++
++import (
++	"fmt"
++	"strings"
++	"unicode"
++
++	tea "github.com/charmbracelet/bubbletea"
++	"github.com/charmbracelet/x/ansi"
++)
++
++func (m model) compact() bool {
++	return (m.width > 0 && m.width <= 60) || (m.height > 0 && m.height <= 22)
++}
++
++func (m model) compactTabCount() int {
++	if m.state.CurrentStage == 1 {
++		return 6
++	}
++	return 2
++}
++
++func (m model) compactProjectList() []Project {
++	projects := visibleProjects(m.state, m.state.CurrentStage)
++	// The transition is tagged Stage 3, but must be reachable from Earth.
++	if m.state.CurrentStage == 2 {
++		for _, p := range allProjects() {
++			if p.Name == "Space Exploration" {
++				projects = append(projects, p)
++			}
++		}
++	}
++	return projects
++}
++
++func (m *model) normalizeCompactNavigation() {
++	if !m.compact() {
++		return
++	}
++	if m.viewStage != 0 && m.viewStage != m.state.CurrentStage {
++		m.activeTab, m.selProject, m.bodyOffset = 0, 0, 0
++	}
++	m.viewStage = m.state.CurrentStage
++	m.activeTab = clampInt(m.activeTab, 0, m.compactTabCount()-1)
++	m.selProject = clampInt(m.selProject, 0, max(0, len(m.compactProjectList())-1))
++	m.bodyOffset = clampInt(m.bodyOffset, 0, m.compactMaxScroll())
++}
++
++func (m *model) handleCompactKey(msg tea.KeyMsg) bool {
++	if msg.Type == tea.KeyRunes {
++		r := string(msg.Runes)
++		if r == "j" || r == "k" {
++			if r == "j" {
++				m.bodyOffset++
++			} else {
++				m.bodyOffset--
++			}
++			return true
++		}
++		if r == "q" {
++			m.err = fmt.Errorf("QUIT")
++			return true
++		}
++		if m.saveMenu {
++			return false // n/d and slot keys belong exclusively to the save menu.
++		}
++		if r == "z" {
++			m.compactNextTab()
++			return true
++		}
++	}
++	if m.saveMenu {
++		return msg.Type != tea.KeyRunes && msg.Type != tea.KeyEscape && msg.Type != tea.KeyCtrlC
++	}
++	switch msg.Type {
++	case tea.KeyTab:
++		m.compactNextTab()
++		return true
++	case tea.KeyUp, tea.KeyDown:
++		delta := 1
++		if msg.Type == tea.KeyUp {
++			delta = -1
++		}
++		if m.activeTab == 1 {
++			n := len(m.compactProjectList())
++			if n > 0 {
++				m.selProject = (m.selProject + delta + n) % n
++			}
++			m.bodyOffset = 0
++		} else if m.state.CurrentStage == 3 {
++			m.probeStatSel = (m.probeStatSel + delta + 8) % 8
++		}
++		return true
++	case tea.KeyLeft, tea.KeyRight:
++		if m.state.CurrentStage == 3 && m.activeTab == 0 {
++			delta := 1
++			if msg.Type == tea.KeyLeft {
++				delta = -1
++			}
++			m.adjustProbeStat(delta)
++		}
++		return true
++	}
++	return false
++}
++
++func (m *model) compactNextTab() {
++	m.activeTab = (m.activeTab + 1) % m.compactTabCount()
++	m.selProject, m.bodyOffset = 0, 0
++}
++
++// Strip styling and pictograms before wrapping; the device font has no emoji.
++func compactText(s string) string {
++	s = strings.NewReplacer("✅", "[done]", "▶", ">", "⏸", "", "✓", "OK", "📌", "", "💡", "", "💬", "", "🌟", "").Replace(ansi.Strip(s))
++	return strings.Map(func(r rune) rune {
++		if r >= 0x1f000 && r <= 0x1faff || r == 0xfe0f || r == 0x200d {
++			return -1
++		}
++		if unicode.IsControl(r) && r != '\n' {
++			return ' '
++		}
++		return r
++	}, s)
++}
++
++func compactLines(text string, width int) []string {
++	if width <= 0 {
++		return nil
++	}
++	var lines []string
++	for _, line := range strings.Split(strings.TrimSpace(compactText(text)), "\n") {
++		line = strings.TrimSpace(line)
++		if line == "" {
++			continue
++		}
++		for _, wrapped := range strings.Split(ansi.Hardwrap(line, width, false), "\n") {
++			// A single wide glyph cannot fit a one-cell terminal.
++			lines = append(lines, ansi.Truncate(wrapped, width, ""))
++		}
++	}
++	return lines
++}
++
++type compactPage struct {
++	header, body, footer []string
++}
++
++func (m model) compactPage() compactPage {
++	s := m.state
++	p := compactPage{}
++	p.header = append(p.header, fmt.Sprintf("回形针 阶段%d 存档%d | 针:%s", s.CurrentStage, m.currentSlot, formatBig(s.PaperclipsTotal)))
++	p.header = append(p.header, fmt.Sprintf("$%.2f 库存:%s 丝:%s 价:%.2f", s.Funds, formatBig(s.UnsoldStock), formatBig(s.WireInches), s.PricePerClip))
++	tabs := []string{"主业", "项目", "策略", "投资", "计算", "无人机"}
++	if s.CurrentStage == 2 {
++		tabs = []string{"蜂群", "项目"}
++	} else if s.CurrentStage == 3 {
++		tabs = []string{"探针", "项目"}
++	}
++	for i := range tabs {
++		if i == m.activeTab {
++			tabs[i] = "[" + tabs[i] + "]"
++		}
++	}
++	tabLine := strings.Join(tabs, " ")
++	if ansi.StringWidth(tabLine) > m.width {
++		tabLine = fmt.Sprintf("%d/%d %s z/Tab", m.activeTab+1, len(tabs), tabs[clampInt(m.activeTab, 0, len(tabs)-1)])
++	}
++	p.header = append(p.header, tabLine)
++	var b strings.Builder
++	if m.saveMenu {
++		p.header = append(p.header, "存档菜单 (n覆盖当前槽 / d删除当前槽)")
++		for _, info := range m.slotInfos {
++			marker := " "
++			if info.Slot == m.currentSlot {
++				marker = ">"
++			}
++			if info.Exists {
++				fmt.Fprintf(&b, "%s%d: 针%s $%.0f 阶段%d\n  %s\n", marker, info.Slot, formatBig(info.Paperclips), info.Funds, info.Stage, info.Time)
++			} else {
++				fmt.Fprintf(&b, "%s%d: 空\n", marker, info.Slot)
++			}
++		}
++		p.footer = []string{"1-5读取 !@#$%写入对应槽", "n新建 d删除 S关闭 j/k滚动", "q/Esc保存退出"}
++	} else {
++		if m.activeTab == 1 {
++			m.compactProjects(&p, &b)
++		} else if s.CurrentStage == 3 {
++			m.compactProbes(&p, &b)
++		} else if s.CurrentStage == 2 {
++			compactSwarm(&b, s)
++		} else {
++			switch m.activeTab {
++			case 0:
++				compactBusiness(&b, s, m.height <= 10)
++			case 2:
++				renderYomiTab(&b, s)
++			case 3:
++				renderInvestTab(&b, s)
++			case 4:
++				renderComputingTab(&b, s)
++			case 5:
++				renderDronesTab(&b, s)
++			}
++		}
++		p.footer = m.compactControls()
++	}
++	if m.height <= 10 {
++		label := tabs[clampInt(m.activeTab, 0, len(tabs)-1)]
++		if m.saveMenu {
++			label = "[存档]"
++		}
++		money := fmt.Sprintf("%.2f", s.Funds)
++		if len(money) > 9 {
++			money = fmt.Sprintf("%.2g", s.Funds)
++		}
++		hud := fmt.Sprintf("%d%s 针:%s $%s", s.CurrentStage, label, formatBig(s.PaperclipsTotal), money)
++		detail := fmt.Sprintf("槽%d 库存:%s 丝:%s 价:%.2f", m.currentSlot, formatBig(s.UnsoldStock), formatBig(s.WireInches), s.PricePerClip)
++		if m.saveMenu {
++			detail = fmt.Sprintf("槽%d n覆盖新建 d删除当前槽", m.currentSlot)
++		} else if m.activeTab == 1 || s.CurrentStage == 3 {
++			detail = p.header[len(p.header)-1]
++		}
++		p.header = []string{hud, detail}
++		p.footer = m.shortControls()
++		fmt.Fprintln(&b, "\nz/Tab切页 j/k滚动 S存档 q/Esc保存退出")
++	}
++	if m.message != "" {
++		// Full feedback remains scrollable even when the fixed status is clipped.
++		b.WriteString("\n提示: " + m.message + "\n")
++	}
++	p.body = compactLines(b.String(), m.width)
++	var footer []string
++	for _, line := range p.footer {
++		footer = append(footer, compactLines(line, m.width)...)
++	}
++	p.footer = footer
++	return p
++}
++
++func compactBusiness(b *strings.Builder, s *GameState, short bool) {
++	if s.AutoClippers == 0 {
++		if short {
++			fmt.Fprintln(b, "开局: a制作，等自动售出赚钱。")
++			fmt.Fprintf(b, "攒$%.0f按b买自动机；w补丝。\n", s.AutoClipperCost)
++		} else {
++			fmt.Fprintln(b, "开局: 按a弯针，等待自动售出赚钱。")
++			fmt.Fprintf(b, "攒$%.0f按b买自动机；缺丝按w买丝。\n", s.AutoClipperCost)
++		}
++	}
++	fmt.Fprintf(b, "针:%d 库存:%d 资金:$%.2f\n", s.PaperclipsTotal, s.UnsoldStock, s.Funds)
++	fmt.Fprintf(b, "售价:$%.2f 需求:%.0f%% 收入:$%.2f\n", s.PricePerClip, s.PublicDemand, s.TotalRevenue)
++	fmt.Fprintf(b, "丝:%d w买1000x%.2f丝:$%.2f\n", s.WireInches, s.WireEfficiency, s.WireCost)
++	fmt.Fprintf(b, "自动机:%d b购买:$%.0f (资金$5解锁)\n", s.AutoClippers, s.AutoClipperCost)
++	fmt.Fprintf(b, "产量:%.0f/s 自动机:%.1f/s\n", s.ClipsPerSec, float64(s.AutoClippers)*s.AutoClipperMult)
++	fmt.Fprintf(b, "营销:Lv%d m购买:$%.0f\n", s.MarketingLevel, s.MarketingCost)
++	fmt.Fprintf(b, "p处理器:$%.0f e内存:$%.0f\n", s.ProcessorCost, s.MemoryCost)
++	fmt.Fprintf(b, "运算:%.0f/%.0f 创意:%.0f 信任:%.0f\n", s.Ops, s.OpsCapacity, s.Creativity, s.Trust)
++	fmt.Fprintf(b, "巨型机:%d M购买:$%.0f 产量:%.0f/s\n", s.MegaClippers, s.MegaClipperCost, float64(s.MegaClippers)*s.MegaClipperMult)
++	fmt.Fprintln(b, "75自动机后到项目页研究MegaClippers。")
++	fmt.Fprintln(b, "后续: HypnoDrones + 100信任，研究释放。")
++}
++
++func compactSwarm(b *strings.Builder, s *GameState) {
++	fmt.Fprintln(b, "先到项目页研究无人机与电网。")
++	fmt.Fprintf(b, "针:%d 丝:%d 资金:$%.2f\n", s.PaperclipsTotal, s.WireInches, s.Funds)
++	fmt.Fprintf(b, "h采集机:%d 下台$%.0f\nw造丝机:%d 下台$%.0f\nf工厂:%d 下台$%.0f\ns太阳能:%d 下座$%.0f\nb电池:%d 下组$%.0f\n", s.HarvesterDrones, s.HarvesterCost, s.WireDrones, s.WireDroneCost, s.ClipFactories, s.FactoryCost, s.SolarFarms, s.FarmCost, s.Batteries, s.BatteryCost)
++	fmt.Fprintf(b, "电力:产%.1f/耗%.1f MW\n储能:%.1f/%.1f\n累计:%.0f MW秒\n蜂群:%d 运算:%.0f\n运算:%.0f 创意:%.0f 信任:%.0f\n", s.PowerProd, s.PowerCons, s.PowerStored, float64(s.Batteries)*s.BatteryCap, s.PowerMWsec, s.TotalDrones, s.SwarmOps, s.Ops, s.Creativity, s.Trust)
++	fmt.Fprintln(b, "达成项目Space Exploration条件进入太空。")
++}
++
++func (m model) compactProjects(p *compactPage, b *strings.Builder) {
++	projects := m.compactProjectList()
++	if len(projects) == 0 {
++		fmt.Fprintln(b, "暂无项目")
++		return
++	}
++	i := clampInt(m.selProject, 0, len(projects)-1)
++	project := projects[i]
++	p.header = append(p.header, fmt.Sprintf(">%d/%d %s", i+1, len(projects), project.Name))
++	fmt.Fprintln(b, project.Name)
++	fmt.Fprintln(b, project.Description)
++	s := m.state
++	fmt.Fprintf(b, "所需/持有 ops:%.0f/%.0f\n创意:%.0f/%.0f yomi:%.0f/%.0f\n信任:%.0f/%.0f 资金:$%.0f/$%.2f\n", project.OpsCost, s.Ops, project.CreatCost, s.Creativity, project.YomiCost, s.Yomi, project.TrustCost, s.Trust, project.FundsCost, s.Funds)
++	if len(project.Prereqs) > 0 {
++		fmt.Fprintln(b, "前置项目: "+strings.Join(project.Prereqs, ", "))
++	}
++	if len(project.OtherPrereqs) > 0 {
++		fmt.Fprintln(b, "其他条件: "+strings.Join(project.OtherPrereqs, ", "))
++	}
++	if s.isProjectResearched(project.Stage, project.Name) {
++		fmt.Fprintln(b, "已完成")
++	} else if s.CanResearch(project) {
++		fmt.Fprintln(b, "可研究: 按r")
++	} else {
++		fmt.Fprintln(b, "条件未满足")
++	}
++	fmt.Fprintln(b, "项目列表 (上下键选择，j/k读详情):")
++	for index, item := range projects {
++		marker := " "
++		if index == i {
++			marker = ">"
++		}
++		status := ""
++		if s.isProjectResearched(item.Stage, item.Name) {
++			status = " [done]"
++		}
++		fmt.Fprintf(b, "%s%d %s%s\n", marker, index+1, item.Name, status)
++	}
++}
++
++func (m model) compactProbes(p *compactPage, b *strings.Builder) {
++	s := m.state
++	names := []string{"速度", "探索", "复制", "避险", "工厂", "采集", "战斗", "信任"}
++	values := []int{s.ProbeSpeed, s.ProbeExplore, s.ProbeReplicate, s.ProbeHazard, s.ProbeFactory, s.ProbeHarvester, s.ProbeCombat, s.ProbeTrust}
++	i := clampInt(m.probeStatSel, 0, 7)
++	selected := fmt.Sprintf(">探针参数: %s %d (上下选 左右调)", names[i], values[i])
++	if m.height <= 10 {
++		selected = fmt.Sprintf(">%s:%d 上下选 左右调 l发射", names[i], values[i])
++	}
++	p.header = append(p.header, selected)
++	fmt.Fprintf(b, "探针:%d 宇宙针:%d\n漂流者:%d 荣誉:%.1f\n", s.Probes, s.UniverseClips, s.Drifters, s.Honor)
++	if s.EndingReached {
++		fmt.Fprintln(b, "宇宙已经充满回形针！")
++	}
++	for index, name := range names {
++		fmt.Fprintf(b, "%s: %d\n", name, values[index])
++	}
++	fmt.Fprintf(b, "l发射花费:%d\n下次复制:%d\n", s.launchCost(), int64(replicateBaseCost))
++}
++
++func (m model) compactControls() []string {
++	var controls []string
++	if m.activeTab == 1 {
++		controls = []string{"上/下选项目 r研究"}
++	} else {
++		switch m.state.CurrentStage {
++		case 1:
++			switch m.activeTab {
++			case 0:
++				controls = []string{"a弯针 w买丝 b自动 u/d调价", "M巨型 m营销 p处理器 e内存"}
++			case 2:
++				controls = []string{"t比赛开关 策略请到项目页研究"}
++			case 3:
++				controls = []string{"i风险 D存入资金 W取出全部"}
++			case 4:
++				controls = []string{"p处理器 e内存 量子请到项目页研究"}
++			case 5:
++				controls = []string{"无人机请到项目页研究"}
++			}
++		case 2:
++			controls = []string{"h采集 w造丝 f工厂 s太阳能 b电池"}
++		case 3:
++			controls = []string{"上/下选参数 左/右调节 l发射"}
++		}
++	}
++	return append(controls, "z/Tab切页 j/k滚动 S存档 q/Esc保存退出")
++}
++
++func (m model) shortControls() []string {
++	if m.saveMenu {
++		return []string{"1-5读 !@#$%写 n新建 d删除", "j/k滚动 S关闭 q/Esc保存退出"}
++	}
++	action := "上/下选项目 r研究"
++	if m.activeTab != 1 {
++		switch m.state.CurrentStage {
++		case 1:
++			action = []string{
++				"a制作 w补丝 b自动 u/d调价", "",
++				"t比赛开关 策略到项目页",
++				"i风险 D存入资金 W取出全部",
++				"p处理器 e内存 量子到项目页",
++				"无人机到项目页研究",
++			}[clampInt(m.activeTab, 0, 5)]
++		case 2:
++			action = "h采集 w造丝 f工厂 s太阳能 b电池"
++		case 3:
++			action = "上/下选参数 左/右调节 l发射"
++		}
++	}
++	return []string{action, "z页 j/k滚 S存档 q/Esc保存退出"}
++}
++
++func (p compactPage) bodyHeight(height int) int {
++	return max(0, height-len(p.header)-len(p.footer)-1)
++}
++
++func (m model) compactMaxScroll() int {
++	p := m.compactPage()
++	return max(0, len(p.body)-max(1, p.bodyHeight(m.height)))
++}
++
++func renderCompact(m model) string {
++	if m.width <= 0 || m.height <= 0 {
++		return ""
++	}
++	p := m.compactPage()
++	h := p.bodyHeight(m.height)
++	offset := clampInt(m.bodyOffset, 0, max(0, len(p.body)-max(1, h)))
++	lines := append([]string{}, p.header...)
++	for i := 0; i < h; i++ {
++		line := ""
++		if offset+i < len(p.body) {
++			line = p.body[offset+i]
++		}
++		lines = append(lines, line)
++	}
++	status := fmt.Sprintf("正文 %d-%d/%d", min(offset+1, len(p.body)), min(offset+h, len(p.body)), len(p.body))
++	if m.message != "" {
++		if m.height <= 10 {
++			status = compactText(m.message)
++		} else {
++			status += " | " + compactText(m.message)
++		}
++	}
++	lines = append(lines, status)
++	lines = append(lines, p.footer...)
++	if len(lines) > m.height {
++		// At tiny heights reserve the available rows for navigation first.
++		lines = lines[len(lines)-m.height:]
++	}
++	for i := range lines {
++		lines[i] = ansi.Truncate(strings.ReplaceAll(compactText(lines[i]), "\n", " "), m.width, "")
++	}
++	return strings.Join(lines, "\n")
++}
+diff --git a/compact_test.go b/compact_test.go
+new file mode 100644
+index 0000000..b645441
+--- /dev/null
++++ b/compact_test.go
+@@ -0,0 +1,529 @@
++package main
++
++import (
++	"fmt"
++	"math"
++	"os"
++	"path/filepath"
++	"reflect"
++	"runtime"
++	"strings"
++	"testing"
++
++	tea "github.com/charmbracelet/bubbletea"
++	"github.com/charmbracelet/x/ansi"
++)
++
++func compactTestModel(t *testing.T) model {
++	t.Helper()
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
++	return model{state: NewGameState(), currentSlot: 1, width: 49, height: 18}
++}
++
++func press(m *model, key string) {
++	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
++}
++
++func assertCompactBounds(t *testing.T, m model) {
++	t.Helper()
++	view := m.View()
++	lines := strings.Split(view, "\n")
++	if len(lines) > m.height {
++		t.Fatalf("%d lines > %d:\n%s", len(lines), m.height, view)
++	}
++	for i, line := range lines {
++		if ansi.StringWidth(line) > m.width {
++			t.Fatalf("line %d width %d > %d: %q", i, ansi.StringWidth(line), m.width, line)
++		}
++	}
++	if strings.ContainsAny(view, "📎📌💡💬🌟✅▶⏸\ufe0f") {
++		t.Fatalf("emoji left in compact view: %s", view)
++	}
++}
++
++func TestCompactAllStagesTabsAndSizes(t *testing.T) {
++	m := compactTestModel(t)
++	for _, size := range [][2]int{{37, 8}, {37, 9}, {49, 18}, {60, 22}, {61, 22}, {60, 23}, {32, 12}, {1, 1}, {2, 3}} {
++		m.width, m.height = size[0], size[1]
++		for stage := 1; stage <= 3; stage++ {
++			m.state.CurrentStage = stage
++			for tab := 0; tab < m.compactTabCount(); tab++ {
++				m.activeTab = tab
++				m.state.AlgoTrading = true
++				m.state.StrategicModeling = true
++				m.state.StrategiesUnlocked = 255
++				m.state.QuantumComputing = true
++				m.state.CreativeIdle = true
++				m.state.CombatUnlocked = true
++				m.state.research("HypnoDrones")
++				for _, offset := range []int{0, 99999} {
++					m.bodyOffset = offset
++					m.message = "\x1b[31m提示: 很长的反馈 " + strings.Repeat("宽", 90) + "\x1b[0m"
++					for _, menu := range []bool{false, true} {
++						m.saveMenu = menu
++						m.slotInfos = []SlotInfo{{Slot: 1, Exists: true, Stage: stage, Time: "Oct 2 12:34", Paperclips: 9999999999}, {Slot: 2}, {Slot: 3}, {Slot: 4}, {Slot: 5}}
++						assertCompactBounds(t, m)
++						if size == [2]int{49, 18} {
++							v := m.View()
++							if !strings.Contains(v, "q/Esc保存退出") || !strings.Contains(v, "j/k滚动") {
++								t.Fatalf("fixed controls missing stage%d tab%d: %s", stage, tab, v)
++							}
++							if !menu && !strings.Contains(v, "z/Tab切页") {
++								t.Fatal("tabs control disappeared")
++							}
++						}
++					}
++				}
++			}
++		}
++	}
++	m.width, m.height = 61, 23
++	if m.compact() {
++		t.Fatal("large layout changed threshold")
++	}
++}
++
++func TestEightRowReadableOpening(t *testing.T) {
++	m := compactTestModel(t)
++	m.width, m.height = 37, 8
++	view := m.View()
++	if path := os.Getenv("PAPERCLIPS_PREVIEW_TEXT"); path != "" {
++		if err := os.WriteFile(path, []byte(view), 0600); err != nil {
++			t.Fatal(err)
++		}
++	}
++	rows := strings.Split(view, "\n")
++	if len(rows) != 8 {
++		t.Fatal(view)
++	}
++	for _, want := range []string{"a制作", "$10按b买自动机", "w补丝"} {
++		if !strings.Contains(strings.Join(rows[2:5], "\n"), want) {
++			t.Fatalf("missing %s: %s", want, view)
++		}
++	}
++	if !strings.Contains(rows[7], "q/Esc保存退出") || !strings.Contains(rows[0], "针:0") {
++		t.Fatal(view)
++	}
++	assertCompactBounds(t, m)
++}
++
++func TestShortOpeningGuideAndFixedRows(t *testing.T) {
++	m := compactTestModel(t)
++	m.width, m.height = 37, 9
++	p := m.compactPage()
++	if len(p.header) != 2 || len(p.footer) != 2 || p.bodyHeight(9) != 4 {
++		t.Fatalf("37x9 budget: header=%d footer=%d body=%d", len(p.header), len(p.footer), p.bodyHeight(9))
++	}
++	view := m.View()
++	rows := strings.Split(view, "\n")
++	body := strings.Join(rows[2:6], "\n")
++	for _, want := range []string{"a制作", "等自动售出", "$10按b买自动机", "w补丝"} {
++		if !strings.Contains(body, want) {
++			t.Fatalf("opening body missing %s:\n%s", want, view)
++		}
++	}
++	for _, want := range []string{"[主业]", "针:0", "$0.00"} {
++		if !strings.Contains(rows[0], want) {
++			t.Fatalf("HUD missing %s: %s", want, rows[0])
++		}
++	}
++	if !strings.Contains(rows[6], "正文") || !strings.Contains(rows[7], "u/d调价") || !strings.Contains(rows[8], "q/Esc保存退出") {
++		t.Fatalf("fixed status or controls missing:\n%s", view)
++	}
++	assertCompactBounds(t, m)
++	t.Logf("37x9 opening:\n%s", view)
++}
++
++func TestShortAllPagesScrollAndSaveError(t *testing.T) {
++	m := compactTestModel(t)
++	m.width, m.height = 37, 9
++	m.state.AlgoTrading, m.state.StrategicModeling = true, true
++	for stage := 1; stage <= 3; stage++ {
++		m.state.CurrentStage, m.viewStage = stage, stage
++		for tab := 0; tab < m.compactTabCount(); tab++ {
++			m.activeTab = tab
++			for _, menu := range []bool{false, true} {
++				m.saveMenu = menu
++				m.slotInfos = m.listSlots()
++				m.message = ""
++				p := m.compactPage()
++				if len(p.header) != 2 || len(p.footer) > 2 || p.bodyHeight(9) < 4 {
++					t.Fatalf("stage%d tab%d menu%v consumed body: %#v", stage, tab, menu, p)
++				}
++				for _, offset := range []int{0, m.compactMaxScroll()} {
++					m.bodyOffset = offset
++					assertCompactBounds(t, m)
++					rows := strings.Split(m.View(), "\n")
++					if rows[0] != ansi.Truncate(p.header[0], 37, "") || rows[1] != ansi.Truncate(p.header[1], 37, "") {
++						t.Fatal("scroll moved HUD/selection")
++					}
++					if !strings.Contains(rows[8], "j/k") || !strings.Contains(rows[8], "S") || !strings.Contains(rows[8], "q/Esc保存退出") {
++						t.Fatalf("navigation hidden: %s", m.View())
++					}
++				}
++				m.bodyOffset = 0
++				press(&m, "k")
++				if m.bodyOffset != 0 {
++					t.Fatal("short top scroll boundary")
++				}
++				for m.bodyOffset < m.compactMaxScroll() {
++					press(&m, "j")
++				}
++				bottom := m.bodyOffset
++				press(&m, "j")
++				if m.bodyOffset != bottom {
++					t.Fatal("short bottom scroll boundary")
++				}
++				m.storageFailure("保存退出", fmt.Errorf("test: %s", strings.Repeat("磁盘写入失败", 20)))
++				rows := strings.Split(m.View(), "\n")
++				if !strings.HasPrefix(rows[6], "保存退出失败:") {
++					t.Fatalf("short error hidden by scroll status: %s", rows[6])
++				}
++				assertCompactBounds(t, m)
++			}
++		}
++	}
++}
++
++func TestShortProjectProbeSelectionAndTabs(t *testing.T) {
++	m := compactTestModel(t)
++	m.width, m.height = 37, 9
++	for stage := 1; stage <= 3; stage++ {
++		m.state.CurrentStage, m.viewStage, m.activeTab, m.selProject = stage, stage, 0, 0
++		press(&m, "z")
++		if m.activeTab != 1 {
++			t.Fatal("z must reach short projects")
++		}
++		projects := m.compactProjectList()
++		for i, p := range projects {
++			m.bodyOffset = 99999
++			selected := ansi.Truncate(fmt.Sprintf(">%d/%d %s", i+1, len(projects), p.Name), 37, "")
++			rows := strings.Split(m.View(), "\n")
++			if rows[1] != selected || !strings.Contains(rows[7], "r研究") {
++				t.Fatalf("short project selection missing stage%d index%d: %s", stage, i, m.View())
++			}
++			m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
++		}
++		m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
++		if m.activeTab != 2%m.compactTabCount() {
++			t.Fatal("Tab no longer compatible")
++		}
++	}
++	m.activeTab, m.probeStatSel = 0, 0
++	names := []string{"速度", "探索", "复制", "避险", "工厂", "采集", "战斗", "信任"}
++	for _, name := range names {
++		m.bodyOffset = 99999
++		rows := strings.Split(m.View(), "\n")
++		if !strings.HasPrefix(rows[1], ">"+name+":") || !strings.Contains(rows[7], "l发射") {
++			t.Fatalf("short probe selection hidden: %s", m.View())
++		}
++		m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
++	}
++}
++
++func TestCompactOpeningAndGameplay(t *testing.T) {
++	m := compactTestModel(t)
++	initial := m.View()
++	for _, want := range []string{"开局:", "按a弯针", "$0.00", "丝:1000", "价:0.25", "a弯针", "w买丝", "b自动", "u/d调价", "q/Esc保存退出", "[主业]", "无人机"} {
++		if !strings.Contains(initial, want) {
++			t.Errorf("missing initial %q:\n%s", want, initial)
++		}
++	}
++	for i := 0; i < 200; i++ {
++		press(&m, "a")
++	}
++	if m.state.PaperclipsTotal != 200 || m.state.UnsoldStock != 200 || m.state.WireInches != 800 {
++		t.Fatal("manual clip action changed")
++	}
++	for i := 0; i < 120; i++ {
++		m.state.Tick(1)
++	}
++	if m.state.Funds < m.state.AutoClipperCost {
++		t.Fatal("opening did not earn enough to buy auto clipper")
++	}
++	press(&m, "b")
++	if m.state.AutoClippers != 1 {
++		t.Fatal("auto clipper not purchased")
++	}
++	assertCompactBounds(t, m)
++	t.Logf("Initial 49x18 view:\n%s\nAfter manual production / sale / purchase:\n%s", initial, m.View())
++}
++
++func TestCompactNavigationAndScroll(t *testing.T) {
++	m := compactTestModel(t)
++	for stage := 1; stage <= 3; stage++ {
++		m.state.CurrentStage = stage
++		m.viewStage, m.activeTab = stage, 0
++		for tab := 1; tab <= m.compactTabCount(); tab++ {
++			press(&m, "z")
++			if m.activeTab != tab%m.compactTabCount() {
++				t.Fatalf("z stage%d tab%d", stage, tab)
++			}
++		}
++		m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
++		if m.activeTab != 1 {
++			t.Fatal("Tab must reach projects")
++		}
++		for i := 0; i < 500; i++ {
++			press(&m, "j")
++		}
++		if m.bodyOffset != m.compactMaxScroll() || stage == 1 && m.bodyOffset == 0 {
++			t.Fatalf("bottom scroll clamp: %d", m.bodyOffset)
++		}
++		for i := 0; i < 500; i++ {
++			press(&m, "k")
++		}
++		if m.bodyOffset != 0 {
++			t.Fatal("top scroll clamp")
++		}
++	}
++}
++
++func TestCompactEveryProjectSelectedVisible(t *testing.T) {
++	m := compactTestModel(t)
++	for stage := 1; stage <= 3; stage++ {
++		m.state.CurrentStage = stage
++		m.viewStage, m.activeTab, m.selProject = stage, 1, 0
++		projects := m.compactProjectList()
++		for i, project := range projects {
++			if m.selProject != i {
++				t.Fatalf("selection stage%d: got %d want %d", stage, m.selProject, i)
++			}
++			for _, offset := range []int{0, 99999} {
++				m.bodyOffset = offset
++				want := ansi.Truncate(fmt.Sprintf(">%d/%d %s", i+1, len(projects), project.Name), 49, "")
++				if !strings.Contains(m.View(), want) {
++					t.Fatalf("selected project hidden: %s", want)
++				}
++				assertCompactBounds(t, m)
++			}
++			m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
++			if m.bodyOffset != 0 {
++				t.Fatal("selection must reset detail scroll")
++			}
++		}
++		if m.selProject != 0 {
++			t.Fatal("project selection did not wrap")
++		}
++		m.handleKey(tea.KeyMsg{Type: tea.KeyUp})
++		if m.selProject != len(projects)-1 {
++			t.Fatal("up did not wrap")
++		}
++	}
++}
++
++func TestCompactProbeAndProjectInputIsolation(t *testing.T) {
++	m := compactTestModel(t)
++	m.state.CurrentStage = 3
++	m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
++	m.handleKey(tea.KeyMsg{Type: tea.KeyRight})
++	if m.probeStatSel != 1 || m.state.ProbeExplore != 1 {
++		t.Fatal("probe controls unreachable")
++	}
++	m.bodyOffset = 9999
++	if !strings.Contains(m.View(), ">探针参数: 探索 1") {
++		t.Fatal("selected probe stat not pinned")
++	}
++	press(&m, "z")
++	m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
++	m.handleKey(tea.KeyMsg{Type: tea.KeyRight})
++	if m.selProject != 1 || m.probeStatSel != 1 || m.state.ProbeExplore != 1 {
++		t.Fatal("project navigation changed probes")
++	}
++	m.state.Ops, m.state.Creativity, m.state.Yomi, m.state.Trust, m.state.Funds = 1e15, 1e15, 1e15, 1e15, 1e15
++	m.selProject = 1
++	p := m.compactProjectList()[1]
++	if !m.state.CanResearch(p) {
++		t.Fatal("test project not affordable")
++	}
++	press(&m, "r")
++	if !m.state.isProjectResearched(3, p.Name) {
++		t.Fatal("stage3 project research not reachable")
++	}
++}
++
++func TestSaveMenuSAndIsolation(t *testing.T) {
++	m := compactTestModel(t)
++	for _, width := range []int{49, 100} {
++		m.width = width
++		if width == 100 {
++			m.height = 40
++		}
++		for stage := 1; stage <= 3; stage++ {
++			m.state.CurrentStage = stage
++			before := *m.state
++			press(&m, "S")
++			if !m.saveMenu || len(m.slotInfos) != 5 {
++				t.Fatal("S did not open menu")
++			}
++			if !reflect.DeepEqual(before, *m.state) {
++				t.Fatal("S changed game state")
++			}
++			for _, key := range []string{"a", "b", "s", "z", "r"} {
++				press(&m, key)
++			}
++			m.handleKey(tea.KeyMsg{Type: tea.KeyRight})
++			if !reflect.DeepEqual(before, *m.state) && width == 49 {
++				t.Fatal("menu key leaked to game")
++			}
++			if stage == 3 && width == 100 && !strings.Contains(m.View(), "Save Slots") {
++				t.Fatal("large stage3 menu not rendered")
++			}
++			press(&m, "S")
++			if m.saveMenu {
++				t.Fatal("S did not close menu")
++			}
++		}
++	}
++}
++
++func TestCompactSaveMenuNewDeleteAndQuit(t *testing.T) {
++	m := compactTestModel(t)
++	m.state.PaperclipsTotal = 123
++	press(&m, "S")
++	press(&m, "n")
++	if m.saveMenu || m.state.PaperclipsTotal != 0 {
++		t.Fatal("n no longer dispatched to new game")
++	}
++	path := filepath.Join(saveDir(), saveSlotName(1))
++	if _, err := os.Stat(path); err != nil {
++		t.Fatal(err)
++	}
++	press(&m, "S")
++	press(&m, "d")
++	if m.saveMenu {
++		t.Fatal("d no longer dispatched to delete")
++	}
++	if _, err := os.Stat(path); !os.IsNotExist(err) {
++		t.Fatalf("delete failed: %v", err)
++	}
++	for _, key := range []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune("q")}, {Type: tea.KeyEscape}} {
++		m.state.PaperclipsTotal = 42
++		press(&m, "S")
++		next, cmd := m.Update(key)
++		m = next.(model)
++		if cmd == nil {
++			t.Fatal("quit command absent")
++		}
++		if _, ok := cmd().(tea.QuitMsg); !ok {
++			t.Fatal("not a quit command")
++		}
++		if err := m.loadFromSlot(1); err != nil || m.state.PaperclipsTotal != 42 {
++			t.Fatalf("quit did not save current slot: %v", err)
++		}
++		m.saveMenu = false
++	}
++}
++
++func TestCompactStageTransitionsViaProjects(t *testing.T) {
++	m := compactTestModel(t)
++	m.state.Trust = 100
++	m.state.research("HypnoDrones")
++	press(&m, "z")
++	for i, p := range m.compactProjectList() {
++		if p.Name == "Release the HypnoDrones" {
++			m.selProject = i
++		}
++	}
++	press(&m, "r")
++	if m.state.CurrentStage != 2 || m.activeTab != 0 {
++		t.Fatal("cannot reach stage 2 through project input")
++	}
++	m.state.Ops = 120000
++	m.state.PowerMWsec = 10000000
++	m.state.PaperclipsTotal = 5000000000000000000
++	press(&m, "z")
++	found := false
++	for i, p := range m.compactProjectList() {
++		if p.Name == "Space Exploration" {
++			m.selProject = i
++			found = true
++		}
++	}
++	if !found {
++		t.Fatal("stage2 transition project unavailable")
++	}
++	press(&m, "r")
++	if m.state.CurrentStage != 3 || m.activeTab != 0 || m.state.Probes != 1 {
++		t.Fatalf("cannot reach stage 3 through project input: %s", m.message)
++	}
++	assertCompactBounds(t, m)
++}
++
++func TestSaveRoundTripAndFailuresPreserveOldSlot(t *testing.T) {
++	m := compactTestModel(t)
++	m.state.PaperclipsTotal = 12345
++	m.state.CurrentStage = 3
++	m.state.ProbeExplore = 7
++	m.state.s3research("Combat")
++	if err := m.saveToSlot(2); err != nil {
++		t.Fatal(err)
++	}
++	m.state.ProbeExplore = 8
++	if err := m.saveToSlot(2); err != nil {
++		t.Fatalf("replace existing save: %v", err)
++	}
++	path := filepath.Join(saveDir(), saveSlotName(2))
++	old, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := *m.state
++	m.state = NewGameState()
++	if err := m.loadFromSlot(2); err != nil || !reflect.DeepEqual(want, *m.state) {
++		t.Fatalf("round trip failed: %v", err)
++	}
++	m.state.Funds = math.NaN()
++	if err := m.saveToSlot(2); err == nil {
++		t.Fatal("invalid JSON number should fail")
++	}
++	got, err := os.ReadFile(path)
++	if err != nil || string(got) != string(old) {
++		t.Fatal("marshal failure changed old save")
++	}
++	m.state.Funds = 0
++	blocked := filepath.Join(saveDir(), saveSlotName(3))
++	if err := os.Mkdir(blocked, 0755); err != nil {
++		t.Fatal(err)
++	}
++	if err := m.saveToSlot(3); err == nil || m.currentSlot != 2 {
++		t.Fatal("rename failure changed current slot")
++	}
++	if runtime.GOOS == "windows" {
++		if err := os.Chmod(path, 0444); err != nil {
++			t.Fatal(err)
++		}
++		defer os.Chmod(path, 0644)
++		m.state.PaperclipsTotal = 999
++		if err := m.saveToSlot(2); err == nil {
++			t.Fatal("read-only destination should reject replacement")
++		}
++		got, err = os.ReadFile(path)
++		if err != nil || string(got) != string(old) {
++			t.Fatal("failed replacement changed old save")
++		}
++	}
++	leftovers, err := filepath.Glob(filepath.Join(saveDir(), ".paperclips-save-*"))
++	if err != nil || len(leftovers) != 0 {
++		t.Fatalf("temporary saves leaked: %v %v", leftovers, err)
++	}
++}
++
++func TestCompactWrappingAndTransitions(t *testing.T) {
++	for _, line := range compactLines("\x1b[31m中英 mixed e\u0301文本\x1b[0m\n"+strings.Repeat("Long", 40), 7) {
++		if ansi.StringWidth(line) > 7 {
++			t.Fatalf("wide line: %q", line)
++		}
++	}
++	m := compactTestModel(t)
++	m.viewStage, m.activeTab, m.bodyOffset = 1, 5, 10
++	m.state.CurrentStage = 2
++	next, _ := m.Update(tea.WindowSizeMsg{Width: 49, Height: 18})
++	m = next.(model)
++	if m.activeTab != 0 || m.bodyOffset != 0 || m.viewStage != 2 {
++		t.Fatal("stage change left stale navigation")
++	}
++	assertCompactBounds(t, m)
++}
+diff --git a/device_save_test.go b/device_save_test.go
+new file mode 100644
+index 0000000..21d279b
+--- /dev/null
++++ b/device_save_test.go
+@@ -0,0 +1,38 @@
++package main
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestDeviceSaveCompatibility(t *testing.T) {
++	path := os.Getenv("PAPERCLIPS_VERIFY_SAVE")
++	if path == "" {
++		t.Skip("set PAPERCLIPS_VERIFY_SAVE to a read-only save fixture")
++	}
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var before GameState
++	if err := json.Unmarshal(data, &before); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("HOME", t.TempDir())
++	t.Setenv("XDG_DATA_HOME", t.TempDir())
++	if err := os.MkdirAll(saveDir(), 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(saveDir(), saveSlotName(1)), data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	m := initialModel()
++	if m.err != nil {
++		t.Fatal(m.err)
++	}
++	if m.state.PaperclipsTotal != before.PaperclipsTotal || m.state.Funds != before.Funds || m.state.CurrentStage != before.CurrentStage || m.state.WireInches != before.WireInches {
++		t.Fatal("loading changed saved progress")
++	}
++}
+diff --git a/input.go b/input.go
+index 11d0427..2b93706 100644
+--- a/input.go
++++ b/input.go
+@@ -7,9 +7,24 @@ import (
+ )
+ 
+ func (m *model) handleKey(msg tea.KeyMsg) {
++	if m.loadFailed {
++		return
++	}
++	if m.compact() {
++		m.normalizeCompactNavigation()
++		wasMenu := m.saveMenu
++		defer func() {
++			if wasMenu != m.saveMenu {
++				m.bodyOffset = 0
++			}
++			m.normalizeCompactNavigation()
++		}()
++		if m.handleCompactKey(msg) {
++			return
++		}
++	}
+ 	switch msg.Type {
+ 	case tea.KeyCtrlC, tea.KeyEscape:
+-		m.saveCurrent()
+ 		m.err = fmt.Errorf("QUIT")
+ 	case tea.KeyRunes:
+ 		m.handleRune(string(msg.Runes))
+@@ -74,6 +89,8 @@ func (m *model) handleRune(r string) {
+ 	}
+ 
+ 	switch r {
++	case "S":
++		m.handleMultiSave(r)
+ 	case "a":
+ 		if s.CurrentStage != 1 {
+ 			return
+@@ -219,7 +236,11 @@ func (m *model) handleRune(r string) {
+ 			return
+ 		}
+ 		// Stage 1: save game
+-		m.saveCurrent()
++		if err := m.saveCurrent(); err != nil {
++			m.storageFailure("保存", err)
++			return
++		}
++		m.err = nil
+ 		m.setMessage(fmt.Sprintf("Saved to %s", saveSlotDisplay(m.currentSlot)))
+ 	case "h":
+ 		// Stage 2: buy Harvester Drone
+@@ -339,6 +360,9 @@ func (m *model) adjustProbeStat(delta int) {
+ func (m *model) researchProject() {
+ 	// Use the selected project index
+ 	projects := visibleProjects(m.state, m.state.CurrentStage)
++	if m.compact() {
++		projects = m.compactProjectList()
++	}
+ 	if m.selProject < 0 || m.selProject >= len(projects) {
+ 		m.setMessage("No project selected.")
+ 		return
+diff --git a/main.go b/main.go
+index 0e89864..a20f3c7 100644
+--- a/main.go
++++ b/main.go
+@@ -23,48 +23,70 @@ type model struct {
+ 	state         *GameState
+ 	width, height int
+ 	err           error
++	loadFailed    bool // no gameplay or writes after a failed startup load
+ 	message       string
+ 	messageTimer  float64
+ 	activeTab     int // 0=main, 1=projects, 2=yomi, 3=invest, 4=computing, 5=drones
+ 	probeStatSel  int // stage 3: selected probe stat (0..7)
+ 	selProject    int // projects tab: selected project index
++	bodyOffset    int // compact view scroll position, never serialized
++	viewStage     int // detects stage transitions for compact navigation
+ 
+ 	// Multi-save
+-	currentSlot int
+-	saveMenu    bool
+-	slotInfos   []SlotInfo
++	currentSlot   int
++	saveMenu      bool
++	slotInfos     []SlotInfo
+ 	autoSaveTimer float64
+ }
+ 
+ func initialModel() model {
+ 	m := model{state: NewGameState(), currentSlot: 1}
+ 	initLegacySave(&m)
++	m.loadFailed = m.err != nil
+ 	return m
+ }
+ 
+-func (m model) Init() tea.Cmd { return tickCmd() }
++func (m model) Init() tea.Cmd {
++	if m.loadFailed {
++		return nil
++	}
++	return tickCmd()
++}
+ 
+ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
++	if m.loadFailed {
++		return m, nil
++	}
+ 	switch msg := msg.(type) {
+ 	case tea.WindowSizeMsg:
+ 		m.width = msg.Width
+ 		m.height = msg.Height
++		m.normalizeCompactNavigation()
+ 		return m, nil
+ 	case tea.KeyMsg:
+ 		m.handleKey(msg)
+ 		if m.err != nil && m.err.Error() == "QUIT" {
+-			m.saveCurrent()
++			if err := m.saveCurrent(); err != nil {
++				m.storageFailure("保存退出", err)
++				return m, nil
++			}
+ 			m.err = nil
+ 			return m, tea.Quit
+ 		}
+ 		return m, nil
+ 	case tickMsg:
+ 		m.state.Tick(tickInterval.Seconds())
++		m.normalizeCompactNavigation()
+ 		// Auto-save every 60 seconds
+ 		m.autoSaveTimer += tickInterval.Seconds()
+ 		if m.autoSaveTimer >= 60.0 {
+ 			m.autoSaveTimer = 0
+-			m.saveCurrent()
++			if err := m.saveCurrent(); err != nil {
++				m.storageFailure("自动保存", err)
++			} else if m.err != nil {
++				m.err = nil
++				m.setMessage("自动保存成功")
++			}
+ 		}
+ 		if m.messageTimer > 0 {
+ 			m.messageTimer -= tickInterval.Seconds()
+@@ -86,7 +108,12 @@ func (m *model) setMessage(msg string) {
+ func (m model) View() string { return renderGame(m) }
+ 
+ func main() {
+-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
++	m := initialModel()
++	if m.loadFailed {
++		fmt.Fprintf(os.Stderr, "读取存档失败；已停止，原存档未被覆盖: %v\n", m.err)
++		os.Exit(1)
++	}
++	p := tea.NewProgram(m, tea.WithAltScreen())
+ 	if _, err := p.Run(); err != nil {
+ 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+ 		os.Exit(1)
+diff --git a/save.go b/save.go
+index 95c9400..7aac6c0 100644
+--- a/save.go
++++ b/save.go
+@@ -7,14 +7,15 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"sort"
++	"strings"
+ )
+ 
+ // ─── Save slots ──────────────────────────────────────────────────────────────
+ 
+ const (
+-	numSlots    = 5
+-	savePrefix  = "paperclips_save"
+-	saveExt     = ".json"
++	numSlots   = 5
++	savePrefix = "paperclips_save"
++	saveExt    = ".json"
+ )
+ 
+ // saveSlotName returns the filename for save slot n (1-indexed).
+@@ -43,19 +44,43 @@ func saveDir() string {
+ }
+ 
+ func (m *model) saveToSlot(slot int) error {
+-	m.state.SaveVersion = 2 // current version
++	if m.loadFailed {
++		return fmt.Errorf("startup load failed; saving is disabled: %w", m.err)
++	}
++	snapshot := *m.state
++	snapshot.SaveVersion = 2
+ 	dir := saveDir()
+ 	if err := os.MkdirAll(dir, 0755); err != nil {
+ 		return fmt.Errorf("mkdir: %w", err)
+ 	}
+ 	path := filepath.Join(dir, saveSlotName(slot))
+-	data, err := json.MarshalIndent(m.state, "", "  ")
++	data, err := json.MarshalIndent(&snapshot, "", "  ")
+ 	if err != nil {
+ 		return fmt.Errorf("marshal: %w", err)
+ 	}
+-	if err := os.WriteFile(path, data, 0644); err != nil {
++	tmp, err := os.CreateTemp(dir, ".paperclips-save-*")
++	if err != nil {
++		return fmt.Errorf("create temp: %w", err)
++	}
++	defer os.Remove(tmp.Name())
++	defer tmp.Close()
++	if _, err := tmp.Write(data); err != nil {
+ 		return fmt.Errorf("write: %w", err)
+ 	}
++	if err := tmp.Chmod(0644); err != nil {
++		return fmt.Errorf("chmod: %w", err)
++	}
++	if err := tmp.Sync(); err != nil {
++		return fmt.Errorf("sync: %w", err)
++	}
++	if err := tmp.Close(); err != nil {
++		return fmt.Errorf("close: %w", err)
++	}
++	// Same-directory rename preserves the previous save until the new one is complete.
++	if err := os.Rename(tmp.Name(), path); err != nil {
++		return fmt.Errorf("rename: %w", err)
++	}
++	m.state.SaveVersion = snapshot.SaveVersion
+ 	m.currentSlot = slot
+ 	return nil
+ }
+@@ -71,6 +96,11 @@ func (m *model) loadFromSlot(slot int) error {
+ 	if err := json.Unmarshal(data, &raw); err != nil {
+ 		return fmt.Errorf("unmarshal: %w", err)
+ 	}
++	stage, hasStage := raw["current_stage"]
++	clips, hasClips := raw["paperclips_total"]
++	if (!hasStage && !hasClips) || (hasStage && stage == nil) || (hasClips && clips == nil) {
++		return fmt.Errorf("missing save progress fields")
++	}
+ 
+ 	// Determine save version
+ 	ver := 1
+@@ -95,6 +125,9 @@ func (m *model) loadFromSlot(slot int) error {
+ 	if err := json.Unmarshal(migrated, newState); err != nil {
+ 		return fmt.Errorf("unmarshal migrated: %w", err)
+ 	}
++	if newState.CurrentStage < 1 || newState.CurrentStage > 3 {
++		return fmt.Errorf("invalid stage: %d", newState.CurrentStage)
++	}
+ 
+ 	*m.state = *newState
+ 	m.currentSlot = slot
+@@ -209,14 +242,16 @@ func formatFileTime(path string) string {
+ // currentSlot is stored on the model.
+ // We also need a helper to find the first existing slot on startup.
+ 
+-func (m *model) findFirstSave() int {
++func (m *model) findFirstSave() (int, error) {
+ 	for i := 1; i <= numSlots; i++ {
+ 		path := filepath.Join(saveDir(), saveSlotName(i))
+ 		if _, err := os.Stat(path); err == nil {
+-			return i
++			return i, nil
++		} else if !os.IsNotExist(err) {
++			return 0, err
+ 		}
+ 	}
+-	return 0
++	return 0, nil
+ }
+ 
+ // ─── Save slot name for display ──────────────────────────────────────────────
+@@ -230,85 +265,82 @@ func saveSlotDisplay(slot int) string {
+ 
+ // ─── New Game ───────────────────────────────────────────────────────────────
+ 
+-func (m *model) newGame(slot int) {
+-	// Reset state to fresh defaults
+-	*m.state = *NewGameState()
++func (m *model) newGame(slot int) error {
++	candidate := *m
++	candidate.state = NewGameState()
++	if err := candidate.saveToSlot(slot); err != nil {
++		return err
++	}
++	*m.state = *candidate.state
+ 	m.currentSlot = slot
+-	m.saveToSlot(slot)
+-	m.setMessage(fmt.Sprintf("New game started in %s", saveSlotDisplay(slot)))
++	return nil
+ }
+ 
+ // DeleteSlot clears a save slot.
+-func (m *model) deleteSlot(slot int) {
++func (m *model) deleteSlot(slot int) error {
+ 	path := filepath.Join(saveDir(), saveSlotName(slot))
+-	os.Remove(path)
+-	// If we deleted the current slot, reset to fresh state
++	if err := os.Remove(path); err != nil {
++		return err
++	}
++	// Keep future autosaves in this slot, never redirect them onto another save.
+ 	if m.currentSlot == slot {
+ 		*m.state = *NewGameState()
+-		m.currentSlot = 1
+ 	}
+-	m.setMessage(fmt.Sprintf("Deleted %s", saveSlotDisplay(slot)))
++	return nil
+ }
+ 
+ // ─── Multi-save key handlers ────────────────────────────────────────────────
+ 
+ func (m *model) handleMultiSave(r string) {
+-	switch r {
+-	case "S": // Shift+S: save menu
++	if r == "S" {
+ 		m.saveMenu = !m.saveMenu
+ 		if m.saveMenu {
+ 			m.slotInfos = m.listSlots()
+ 		}
++		return
++	}
++	if !m.saveMenu {
++		return
++	}
++	var err error
++	var action, success string
++	switch r {
+ 	case "n":
+-		if m.saveMenu {
+-			m.newGame(m.currentSlot)
+-			m.saveMenu = false
+-		}
++		action = "新建"
++		err = m.newGame(m.currentSlot)
++		success = fmt.Sprintf("New game started in %s", saveSlotDisplay(m.currentSlot))
+ 	case "d":
+-		if m.saveMenu {
+-			m.deleteSlot(m.currentSlot)
+-			m.slotInfos = m.listSlots()
+-			m.saveMenu = false
+-		}
++		action = "删除"
++		slot := m.currentSlot
++		err = m.deleteSlot(slot)
++		success = fmt.Sprintf("Deleted %s", saveSlotDisplay(slot))
+ 	case "1", "2", "3", "4", "5":
+-		if m.saveMenu {
+-			slot := int(r[0] - '0')
+-			m.loadFromSlot(slot)
+-			m.setMessage(fmt.Sprintf("Loaded %s", saveSlotDisplay(slot)))
+-			m.saveMenu = false
+-		}
+-	case "!":
+-		if m.saveMenu {
+-			// Save to slot 1 (Shift+1)
+-			m.saveToSlot(1)
+-			m.setMessage("Saved to Slot 1")
+-			m.saveMenu = false
+-		}
+-	case "@":
+-		if m.saveMenu {
+-			m.saveToSlot(2)
+-			m.setMessage("Saved to Slot 2")
+-			m.saveMenu = false
+-		}
+-	case "#":
+-		if m.saveMenu {
+-			m.saveToSlot(3)
+-			m.setMessage("Saved to Slot 3")
+-			m.saveMenu = false
+-		}
+-	case "$":
+-		if m.saveMenu {
+-			m.saveToSlot(4)
+-			m.setMessage("Saved to Slot 4")
+-			m.saveMenu = false
+-		}
+-	case "%":
+-		if m.saveMenu {
+-			m.saveToSlot(5)
+-			m.setMessage("Saved to Slot 5")
+-			m.saveMenu = false
+-		}
++		action = "读取"
++		slot := int(r[0] - '0')
++		err = m.loadFromSlot(slot)
++		success = fmt.Sprintf("Loaded %s", saveSlotDisplay(slot))
++	case "!", "@", "#", "$", "%":
++		action = "保存"
++		slot := strings.Index("!@#$%", r) + 1
++		err = m.saveToSlot(slot)
++		success = fmt.Sprintf("Saved to %s", saveSlotDisplay(slot))
++	default:
++		return
++	}
++	if err != nil {
++		m.storageFailure(action, err)
++		return
+ 	}
++	m.err = nil
++	m.slotInfos = m.listSlots()
++	m.saveMenu = false
++	m.setMessage(success)
++}
++
++func (m *model) storageFailure(action string, err error) {
++	m.err = err
++	m.message = action + "失败: " + err.Error()
++	m.messageTimer = 0
+ }
+ 
+ // ─── Backup existing save ────────────────────────────────────────────────────
+@@ -326,6 +358,8 @@ func (m *model) MigrateLegacySave() error {
+ 	if _, err := os.Stat(slot1Path); err == nil {
+ 		// Slot 1 exists; don't overwrite
+ 		return nil
++	} else if !os.IsNotExist(err) {
++		return err
+ 	}
+ 
+ 	// Save as slot 1
+@@ -334,7 +368,9 @@ func (m *model) MigrateLegacySave() error {
+ 	}
+ 
+ 	// Rename old file to .bak
+-	os.Rename(oldPath, oldPath+".bak")
++	if err := os.Rename(oldPath, oldPath+".bak"); err != nil {
++		return fmt.Errorf("backup legacy: %w", err)
++	}
+ 	return nil
+ }
+ 
+@@ -344,11 +380,16 @@ func initLegacySave(m *model) {
+ 	if err := m.MigrateLegacySave(); err != nil {
+ 		if !os.IsNotExist(err) {
+ 			m.err = fmt.Errorf("legacy migration: %w", err)
++			return
+ 		}
+ 	}
+ 
+-	// Then find and load the most recent slot
+-	slot := m.findFirstSave()
++	// Then find and load the first existing slot
++	slot, err := m.findFirstSave()
++	if err != nil {
++		m.err = fmt.Errorf("find save: %w", err)
++		return
++	}
+ 	if slot > 0 {
+ 		if err := m.loadFromSlot(slot); err != nil {
+ 			m.err = fmt.Errorf("load slot %d: %w", slot, err)
+@@ -357,12 +398,10 @@ func initLegacySave(m *model) {
+ }
+ 
+ // Default save on quit: save to current slot
+-func (m *model) saveCurrent() {
++func (m *model) saveCurrent() error {
+ 	slot := m.currentSlot
+ 	if slot < 1 || slot > numSlots {
+ 		slot = 1 // fallback
+ 	}
+-	if err := m.saveToSlot(slot); err != nil {
+-		m.err = err
+-	}
++	return m.saveToSlot(slot)
+ }
+diff --git a/save_errors_test.go b/save_errors_test.go
+new file mode 100644
+index 0000000..ea33ea4
+--- /dev/null
++++ b/save_errors_test.go
+@@ -0,0 +1,226 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"testing"
++
++	tea "github.com/charmbracelet/bubbletea"
++)
++
++func blockSaveSlot(t *testing.T, slot int) string {
++	t.Helper()
++	path := filepath.Join(saveDir(), saveSlotName(slot))
++	if err := os.MkdirAll(path, 0755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(path, "keep"), []byte("original"), 0644); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
++
++func TestQuitFailureStaysInGameAndRetrySucceeds(t *testing.T) {
++	for _, key := range []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune("q")}, {Type: tea.KeyEscape}, {Type: tea.KeyCtrlC}} {
++		t.Run(key.String(), func(t *testing.T) {
++			m := compactTestModel(t)
++			m.state.PaperclipsTotal = 123
++			before := *m.state
++			blocked := blockSaveSlot(t, 1)
++			next, cmd := m.Update(key)
++			m = next.(model)
++			if cmd != nil || m.err == nil || m.err.Error() == "QUIT" || !strings.Contains(m.message, "保存退出失败") {
++				t.Fatalf("failed save must not quit: cmd=%v err=%v message=%s", cmd != nil, m.err, m.message)
++			}
++			if !reflect.DeepEqual(before, *m.state) || m.currentSlot != 1 {
++				t.Fatal("failed quit changed game state")
++			}
++			if !strings.Contains(m.View(), "保存退出失败") {
++				t.Fatal("save failure not visible")
++			}
++			assertCompactBounds(t, m)
++			if err := os.Remove(filepath.Join(blocked, "keep")); err != nil {
++				t.Fatal(err)
++			}
++			if err := os.Remove(blocked); err != nil {
++				t.Fatal(err)
++			}
++			next, cmd = m.Update(key)
++			m = next.(model)
++			if cmd == nil || m.err != nil {
++				t.Fatalf("successful retry did not quit: %v", m.err)
++			}
++			if _, ok := cmd().(tea.QuitMsg); !ok {
++				t.Fatal("expected quit command")
++			}
++			if err := m.loadFromSlot(1); err != nil || m.state.PaperclipsTotal != 123 {
++				t.Fatalf("retry did not persist progress: %v", err)
++			}
++		})
++	}
++}
++
++func TestFailedSaveActionsPreserveStateAndDoNotClaimSuccess(t *testing.T) {
++	for _, key := range []string{"s", "!", "@", "#", "$", "%", "n", "d", "2"} {
++		t.Run(key, func(t *testing.T) {
++			m := compactTestModel(t)
++			m.state.PaperclipsTotal, m.state.Funds = 777, 23
++			before := *m.state
++			for slot := 1; slot <= 5; slot++ {
++				blockSaveSlot(t, slot)
++			}
++			if key != "s" {
++				press(&m, "S")
++			}
++			press(&m, key)
++			if m.err == nil || !strings.Contains(m.message, "失败") || strings.Contains(m.message, "Saved") || strings.Contains(m.message, "Loaded") {
++				t.Fatalf("false success: %v %s", m.err, m.message)
++			}
++			if !reflect.DeepEqual(before, *m.state) || m.currentSlot != 1 {
++				t.Fatal("failed action mutated memory/slot")
++			}
++			if key != "s" && !m.saveMenu {
++				t.Fatal("failed menu action should leave menu open")
++			}
++			for slot := 1; slot <= 5; slot++ {
++				data, err := os.ReadFile(filepath.Join(saveDir(), saveSlotName(slot), "keep"))
++				if err != nil || string(data) != "original" {
++					t.Fatalf("failed action changed slot %d", slot)
++				}
++			}
++			assertCompactBounds(t, m)
++		})
++	}
++}
++
++func TestFailedSlotLoadPreservesStateAndMenu(t *testing.T) {
++	m := compactTestModel(t)
++	m.state.PaperclipsTotal = 1234
++	before := *m.state
++	if err := os.MkdirAll(saveDir(), 0755); err != nil {
++		t.Fatal(err)
++	}
++	path := filepath.Join(saveDir(), saveSlotName(2))
++	for _, data := range []string{"{broken", "null", "{}", `{"unknown":1}`, `{"current_stage":null}`, `{"paperclips_total":null}`, `{"current_stage":99}`} {
++		if err := os.WriteFile(path, []byte(data), 0644); err != nil {
++			t.Fatal(err)
++		}
++		m.saveMenu = true
++		press(&m, "2")
++		if m.err == nil || !m.saveMenu || !strings.Contains(m.message, "读取失败") || m.currentSlot != 1 || !reflect.DeepEqual(before, *m.state) {
++			t.Fatal("corrupt load did not preserve old state")
++		}
++		got, err := os.ReadFile(path)
++		if err != nil || string(got) != data {
++			t.Fatal("corrupt input was changed")
++		}
++	}
++}
++
++func TestAutoSaveFailurePersistsThenRecovers(t *testing.T) {
++	m := compactTestModel(t)
++	blocked := blockSaveSlot(t, 1)
++	m.autoSaveTimer = 60
++	next, _ := m.Update(tickMsg{})
++	m = next.(model)
++	if m.err == nil || !strings.Contains(m.message, "自动保存失败") || m.messageTimer != 0 {
++		t.Fatal("autosave failure was hidden")
++	}
++	for i := 0; i < 100; i++ {
++		next, _ = m.Update(tickMsg{})
++		m = next.(model)
++	}
++	if !strings.Contains(m.message, "自动保存失败") {
++		t.Fatal("error disappeared before recovery")
++	}
++	if err := os.Remove(filepath.Join(blocked, "keep")); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Remove(blocked); err != nil {
++		t.Fatal(err)
++	}
++	m.autoSaveTimer = 60
++	next, _ = m.Update(tickMsg{})
++	m = next.(model)
++	if m.err != nil || m.message != "自动保存成功" {
++		t.Fatal("autosave recovery did not clear error")
++	}
++}
++
++func TestCorruptStartupStopsTicksInputsAndWrites(t *testing.T) {
++	for _, data := range []string{"{broken", "null", "{}", `{"unknown":1}`, `{"current_stage":null}`, `{"paperclips_total":null}`, `{"current_stage":99}`} {
++		t.Run(data, func(t *testing.T) {
++			compactTestModel(t)
++			if err := os.MkdirAll(saveDir(), 0755); err != nil {
++				t.Fatal(err)
++			}
++			path := filepath.Join(saveDir(), saveSlotName(1))
++			if err := os.WriteFile(path, []byte(data), 0644); err != nil {
++				t.Fatal(err)
++			}
++			m := initialModel()
++			if !m.loadFailed || m.err == nil || m.Init() != nil {
++				t.Fatal("corrupt startup was allowed to run")
++			}
++			before := *m.state
++			m.autoSaveTimer = 60
++			for _, msg := range []tea.Msg{tickMsg{}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")}, tea.KeyMsg{Type: tea.KeyEscape}} {
++				next, cmd := m.Update(msg)
++				m = next.(model)
++				if cmd != nil || !reflect.DeepEqual(before, *m.state) {
++					t.Fatal("failed startup processed gameplay or scheduled ticks")
++				}
++			}
++			if err := m.saveCurrent(); err == nil {
++				t.Fatal("failed startup allowed direct save")
++			}
++			got, err := os.ReadFile(path)
++			if err != nil || string(got) != data {
++				t.Fatal("startup replaced damaged save")
++			}
++		})
++	}
++}
++
++func TestDeletingCurrentSlotDoesNotRedirectAutosave(t *testing.T) {
++	m := compactTestModel(t)
++	m.state.PaperclipsTotal = 111
++	if err := m.saveToSlot(1); err != nil {
++		t.Fatal(err)
++	}
++	path := filepath.Join(saveDir(), saveSlotName(1))
++	before, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	m.state.PaperclipsTotal = 333
++	if err := m.saveToSlot(3); err != nil {
++		t.Fatal(err)
++	}
++	press(&m, "S")
++	press(&m, "d")
++	if m.currentSlot != 3 || m.state.PaperclipsTotal != 0 || m.saveMenu {
++		t.Fatal("delete redirected active slot")
++	}
++	m.autoSaveTimer = 60
++	next, _ := m.Update(tickMsg{})
++	m = next.(model)
++	after, err := os.ReadFile(path)
++	if err != nil || string(after) != string(before) {
++		t.Fatal("delete followed by autosave overwrote slot 1")
++	}
++}
++
++func TestHealthyStartupStillLoadsAndRuns(t *testing.T) {
++	m := compactTestModel(t)
++	m.state.PaperclipsTotal = 987
++	if err := m.saveToSlot(3); err != nil {
++		t.Fatal(err)
++	}
++	loaded := initialModel()
++	if loaded.loadFailed || loaded.err != nil || loaded.currentSlot != 3 || loaded.state.PaperclipsTotal != 987 || loaded.Init() == nil {
++		t.Fatalf("healthy startup changed: %v", loaded.err)
++	}
++}
+diff --git a/view.go b/view.go
+index 9542979..a82228e 100644
+--- a/view.go
++++ b/view.go
+@@ -25,6 +25,9 @@ var (
+ )
+ 
+ func renderGame(m model) string {
++	if m.compact() {
++		return renderCompact(m)
++	}
+ 	s := m.state
+ 	var b strings.Builder
+ 
+@@ -50,6 +53,7 @@ func renderGame(m model) string {
+ 	// Stage 3 has its own dedicated view
+ 	if s.CurrentStage == 3 {
+ 		renderStage3(&b, m, s)
++		renderSaveMenu(&b, m)
+ 		// Message
+ 		if m.message != "" {
+ 			b.WriteString("\n" + stMsg.Render("💬 "+m.message) + "\n")
+@@ -74,23 +78,7 @@ func renderGame(m model) string {
+ 		renderDronesTab(&b, s)
+ 	}
+ 
+-	// Save Menu
+-	if m.saveMenu {
+-		b.WriteString("\n" + stSec.Render("Save Slots  [S] close  [1-5] load  [!@#$%] save  [n] new  [d] delete") + "\n")
+-		for _, info := range m.slotInfos {
+-			line := fmt.Sprintf("  %d:", info.Slot)
+-			if m.currentSlot == info.Slot {
+-				line = "▶" + line[1:]
+-			}
+-			if info.Exists {
+-				line += fmt.Sprintf(" %s clips  $%.0f  Stage %d  (%s)",
+-					formatBig(info.Paperclips), info.Funds, info.Stage, info.Time)
+-			} else {
+-				line += " (empty)"
+-			}
+-			b.WriteString(stVal.Render(line) + "\n")
+-		}
+-	}
++	renderSaveMenu(&b, m)
+ 
+ 	// Message
+ 	if m.message != "" {
+@@ -103,6 +91,26 @@ func renderGame(m model) string {
+ 	return b.String()
+ }
+ 
++func renderSaveMenu(b *strings.Builder, m model) {
++	if !m.saveMenu {
++		return
++	}
++	b.WriteString("\n" + stSec.Render("Save Slots  [S] close  [1-5] load  [!@#$%] save  [n] new  [d] delete") + "\n")
++	for _, info := range m.slotInfos {
++		line := fmt.Sprintf("  %d:", info.Slot)
++		if m.currentSlot == info.Slot {
++			line = "▶" + line[1:]
++		}
++		if info.Exists {
++			line += fmt.Sprintf(" %s clips  $%.0f  Stage %d  (%s)",
++				formatBig(info.Paperclips), info.Funds, info.Stage, info.Time)
++		} else {
++			line += " (empty)"
++		}
++		b.WriteString(stVal.Render(line) + "\n")
++	}
++}
++
+ func controlsFor(m model) string {
+ 	s := m.state
+ 	switch s.CurrentStage {

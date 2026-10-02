@@ -2,12 +2,13 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"c1device"
 )
 
-// TestPreview renders the UI to preview-*.frame for PC-side PNG conversion.
+// TestPreview renders the UI to temporary preview-*.frame files.
 func TestPreview(t *testing.T) {
 	face, err := c1device.NewBitmapFace(fontData, 16)
 	if err != nil {
@@ -15,23 +16,26 @@ func TestPreview(t *testing.T) {
 	}
 	defer face.Close()
 
+	dir := t.TempDir()
 	cases := []struct {
-		name    string
-		sel     int
-		first   int
-		volume  int
-		playing int
-		note    string
+		name   string
+		sel    int
+		first  int
+		volume int
+		player player
 	}{
-		{"idle", 0, 0, 32, -1, ""},
-		{"playing", 1, 0, 64, 1, ""},
-		{"scrolled", 7, 2, 80, 6, "连接中…"},
+		{"initial", 0, 0, 32, newPlayer(nil)},
+		{"idle", 0, 0, 32, player{playing: -1}},
+		{"playing", 1, 0, 64, player{playing: 1}},
+		{"scrolled", 7, 2, 80, player{playing: 6, note: "连接中…"}},
 	}
 	for _, tc := range cases {
-		p := &player{playing: tc.playing, note: tc.note}
-		frame := render(face, tc.sel, tc.first, tc.volume, p)
-		if err := os.WriteFile("preview-"+tc.name+".frame", frame[:], 0o644); err != nil {
-			t.Fatal(err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			frame := render(face, tc.sel, tc.first, tc.volume, &tc.player)
+			path := filepath.Join(dir, "preview-"+tc.name+".frame")
+			if err := os.WriteFile(path, frame[:], 0o644); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

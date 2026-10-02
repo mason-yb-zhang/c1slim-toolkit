@@ -1,11 +1,11 @@
 // 网络收音机 — C1-Slim 原生网络电台应用。
-// 方向键选台，OK 播放/停止，左右键或音量键调节音量，BACK/HOME 退出。
+// 方向键选台，OK 播放/停止，左右键或音量键调节音量，BACK 退出。
 package main
 
 import (
 	_ "embed"
+	"fmt"
 	"image"
-	"os/exec"
 
 	"c1device"
 )
@@ -20,28 +20,6 @@ const (
 	listTop  = rowH * 2
 	listRows = 6
 )
-
-type station struct {
-	name string
-	url  string
-}
-
-var stations = []station{
-	{"中国之声", "https://lhttp.qtfm.cn/live/15318317/64k.mp3"},
-	{"上海新闻广播", "http://lhttp.qingting.fm/live/270/64k.mp3"},
-	{"北京新闻广播", "https://lhttp.qtfm.cn/live/339/64k.mp3"},
-	{"广东音乐之声", "https://lhttp.qtfm.cn/live/1260/64k.mp3"},
-	{"华语经典500首", "https://lhttp.qtfm.cn/live/5022308/64k.mp3"},
-	{"台湾古典音乐", "http://59.120.88.155:8000/live.mp3"},
-	{"安徽评书故事", "https://lhttp.qtfm.cn/live/1951/64k.mp3"},
-	{"第一财经", "http://lhttp.qingting.fm/live/276/64k.mp3"},
-}
-
-type player struct {
-	cmd  *exec.Cmd
-	playing int // index into stations, -1 = stopped
-	note string
-}
 
 func render(face *c1device.Face, sel, first, volume int, p *player) c1device.Frame {
 	c := c1device.NewCanvas()
@@ -58,6 +36,12 @@ func render(face *c1device.Face, sel, first, volume int, p *player) c1device.Fra
 			c.DrawRect(r)
 		}
 	}
+
+	group := "其他电台"
+	if stations[sel].broadcastID != "" {
+		group = "中央广播"
+	}
+	c.DrawText(face, 2, rowH, fmt.Sprintf("%s  %d/%d", group, sel+1, len(stations)))
 
 	// 列表
 	for row := 0; row < listRows; row++ {
@@ -101,4 +85,3 @@ func clamp(v, lo, hi int) int {
 	}
 	return v
 }
-

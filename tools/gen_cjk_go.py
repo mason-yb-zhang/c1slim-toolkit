@@ -1,89 +1,40 @@
 #!/usr/bin/env python3
-"""Generate cjkfont.go for C1Terminal: 12x8 CJK bitmaps (double-width cells).
-
-Source: book-reader pkg-font.bin (C1BF: [LE u32 cp][w u8][16 BE row-words]).
-Downsample 16x16 -> 12x8: width nearest (x*4//3), height OR-merge of row pairs
-(stroke-preserving). Packed 2 bytes/row MSB-first, 8 rows = 16 bytes/char.
-Coverage: all GB2312 chars (same set as the LVM synthesis).
-"""
+"""Generate native 16px terminal glyphs from the bundled C1BF Unifont data."""
+import argparse
+from pathlib import Path
 import struct
 
-SRC = 'D:/dev/c1-slim/repos/C1auncher/App/book-reader/assets/pkg-font.bin'
-OUT = 'D:/dev/c1-slim/repos/C1-Slim-Ports/C1Terminal/internal/terminalui/cjkfont.go'
-
-data = open(SRC, 'rb').read()
-glyphs = {}
-for i in range(4, len(data) - 36, 37):
-    cp = struct.unpack('<I', data[i:i + 4])[0]
-    w = data[i + 4]
-    rows = [struct.unpack('>H', data[i + 5 + r * 2:i + 7 + r * 2])[0] for r in range(16)]
-    glyphs[cp] = (w, rows)
-
-FALLBACK = glyphs.get(0xFFFD)
-
-
-def grid(cp):
-    w, rows = glyphs.get(cp, FALLBACK)
-    g = [[bool(rows[y] & (0x8000 >> x)) for x in range(w)] for y in range(16)]
-    if w < 16:
-        g = [r + [False] * (16 - w) for r in g]
-    return g
-
-
-def downsample(g):
-    # 16x16 -> 12x8
-    out = [[False] * 12 for _ in range(8)]
-    for y in range(8):
-        for x in range(12):
-            out[y][x] = g[y * 2][x * 4 // 3] or g[y * 2 + 1][x * 4 // 3]
-    return out
-
-
-def pack(g):
-    b = bytearray()
-    for y in range(8):
-        word = 0
-        for x in range(12):
-            if g[y][x]:
-                word |= 1 << (15 - x)
-        b += struct.pack('>H', word)
-    return bytes(b)
-
-
-entries = []
-for c1 in range(0xA1, 0xF8):
-    for c2 in range(0xA1, 0xFF):
+parser = argparse.ArgumentParser()
+parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[1] / "radio/assets/pkg-font.bin")
+parser.add_argument("--output", type=Path, required=True)
+args = parser.parse_args()
+data = args.source.read_bytes()
+if data[:4] != b"C1BF" or (len(data) - 4) % 37:
+    raise SystemExit("Invalid C1BF font")
+wanted = set(range(0x20, 0x7f)) | {0xfffd}
+for lead in range(0xa1, 0xf8):
+    for tail in range(0xa1, 0xff):
         try:
-            cp = ord(bytes([c1, c2]).decode('gb2312'))
+            wanted.add(ord(bytes([lead, tail]).decode("gb2312")))
         except UnicodeDecodeError:
-            continue
-        if cp not in glyphs:
-            continue
-        entries.append((cp, pack(downsample(grid(cp)))))
-entries.sort()
-# dedupe (overlap zones may repeat cps)
-seen = set()
-uniq = []
-for cp, bmp in entries:
-    if cp not in seen:
-        seen.add(cp)
-        uniq.append((cp, bmp))
-
-with open(OUT, 'w', encoding='utf-8') as f:
-    f.write('package terminalui\n\n')
-    f.write('// Generated 12x8 CJK bitmaps (double-width) from GNU Unifont.\n')
-    f.write('// Each glyph: 8 rows x 2 bytes, MSB-first, 12 pixels wide.\n')
-    f.write('type cjkEntry struct {\n\tcp  rune\n\tbmp [16]byte\n}\n\n')
-    f.write('var cjkTable = []cjkEntry{\n')
-    for cp, bmp in uniq:
-        f.write('\t{0x%x, [16]byte{%s}},\n' % (cp, ', '.join('0x%02x' % b for b in bmp)))
-    f.write('}\n\n')
-    f.write('func cjkBitmap(r rune) ([16]byte, bool) {\n')
-    f.write('\tlo, hi := 0, len(cjkTable)-1\n')
-    f.write('\tfor lo <= hi {\n')
-    f.write('\t\tmid := (lo + hi) / 2\n')
-    f.write('\t\tif cjkTable[mid].cp < r {\n\t\t\tlo = mid + 1\n')
-    f.write('\t\t} else if cjkTable[mid].cp > r {\n\t\t\thi = mid - 1\n')
-    f.write('\t\t} else {\n\t\t\treturn cjkTable[mid].bmp, true\n\t\t}\n\t}\n')
-    f.write('\treturn [16]byte{}, false\n}\n')
-print('chars:', len(uniq), '->', OUT)
+            pass
+entries = {}
+for offset in range(4, len(data), 37):
+    cp = struct.unpack_from("<I", data, offset)[0]
+    width = data[offset + 4]
+    if not 1 <= width <= 16:
+        raise SystemExit("Invalid glyph width")
+    if cp in wanted:
+        entries[cp] = data[offset + 5:offset + 37]
+if ord('?') not in entries:
+    raise SystemExit("Missing fallback glyph")
+with args.output.open("w", encoding="utf-8", newline="\n") as out:
+    out.write("package terminalui\n\n")
+    out.write("// Generated native 16px GNU Unifont glyphs; do not resample the strokes.\n")
+    out.write("type cjkEntry struct {\n\tcp rune\n\tbmp [32]byte\n}\n\nvar cjkTable = []cjkEntry{\n")
+    for cp, bitmap in sorted(entries.items()):
+        out.write("\t{0x%x, [32]byte{%s}},\n" % (cp, ",".join("0x%02x" % value for value in bitmap)))
+    out.write("}\n\nfunc cjkBitmap(r rune) ([32]byte, bool) {\n")
+    out.write("\tlo, hi := 0, len(cjkTable)-1\n\tfor lo <= hi {\n\t\tmid := (lo+hi)/2\n")
+    out.write("\t\tif cjkTable[mid].cp < r { lo = mid+1 } else if cjkTable[mid].cp > r { hi = mid-1 } else { return cjkTable[mid].bmp, true }\n\t}\n\treturn [32]byte{}, false\n}\n")
+print(f"Native 16px glyphs: {len(entries)} -> {args.output}")

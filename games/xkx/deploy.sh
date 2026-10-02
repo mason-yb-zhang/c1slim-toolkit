@@ -1,6 +1,6 @@
 #!/bin/sh
 # 北大侠客行 MUD 部署：设备自带 busybox telnet，经 c1term 直连。
-# 已知问题：服务器为 GBK 编码，需配合 GBK→UTF-8 转换器（本仓库 TODO）才能正常显示中文。
+# 需使用修正版 c1term，并通过 xkx.cmd 启用 C1TERM_ENCODING=gbk。
 set -eu
 APPS=/storage/c1/local-apps/apps
 MANIFESTS=/storage/c1/local-apps/manifests
@@ -12,6 +12,7 @@ EOF
 
 adb shell "mkdir -p $APPS/xkx/bin"
 adb push play.sh "$APPS/xkx/bin/play.sh"
+adb push xkx.cmd /storage/c1/local-apps/bin/xkx.cmd
 
 cat > 07-xkx.json <<'EOF'
 {
@@ -22,4 +23,4 @@ cat > 07-xkx.json <<'EOF'
 }
 EOF
 adb push 07-xkx.json "$MANIFESTS/07-xkx.json"
-echo "完成。英文指令可用；中文显示等 GBK 转换器。"
+echo "完成。需安装支持GBK转码的c1term；账号登录由用户自行操作。"

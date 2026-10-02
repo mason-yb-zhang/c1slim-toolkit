@@ -1,5 +1,5 @@
 #!/bin/sh
-# Universal Paperclips（Go 移植版）部署：构建 + r2 补丁 + 清单。
+# Universal Paperclips（Go 移植版）部署示例；先完成备份与清单哈希核验。
 # 上游：https://github.com/xieguaiwu/universal-paperclips （Bubble Tea TUI，三阶段完整）
 set -eu
 APPS=/storage/c1/local-apps/apps
@@ -10,17 +10,6 @@ cd universal-paperclips
 GOOS=linux GOARCH=mipsle GOMIPS=hardfloat CGO_ENABLED=0 \
     go build -mod=vendor -trimpath -ldflags "-s -w" -o paperclips .
 cd ..
-
-# e_flags ISA 域 r1 -> r2（启动器校验要求；原理见 docs/device-quirks.md 第 3 条）
-python3 - <<'EOF'
-import struct
-d = bytearray(open('universal-paperclips/paperclips', 'rb').read())
-f = struct.unpack('<I', d[36:40])[0]
-if f & 0xf0000000 == 0x50000000:
-    d[36:40] = struct.pack('<I', (f & ~0xf0000000) | 0x70000000)
-    open('universal-paperclips/paperclips', 'wb').write(d)
-    print('patched to r2')
-EOF
 
 adb shell "mkdir -p $APPS/paperclips/bin /storage/c1games/upc/data"
 adb push universal-paperclips/paperclips "/storage/c1games/upc/paperclips"

@@ -3,97 +3,79 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime/debug"
-	"syscall"
 	"time"
 
 	"c1device"
 )
 
-func (p *player) toggle(idx int) {
-	if p.playing == idx {
-		p.stop()
-		p.note = "已停止"
-		return
-	}
-	p.stop()
-	p.playing = idx
-	p.note = "连接中…"
-	cmd := exec.Command("/bin/sh", "-c",
-		"curl -s '"+stations[idx].url+"' | /storage/c1lavax/c1dec")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	log, err := os.OpenFile("/tmp/radio-native.log",
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err == nil {
-		cmd.Stderr = log
-		defer log.Close()
-	}
-	if err := cmd.Start(); err != nil {
-		p.playing = -1
-		p.note = "启动失败"
-		return
-	}
-	p.cmd = cmd
-	p.note = ""
-	go func() {
-		_ = cmd.Wait()
-		if p.cmd == cmd {
-			p.playing = -1
-			p.note = "已停止"
-		}
-	}()
-}
-
-func (p *player) stop() {
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
-		_, _ = os.FindProcess(p.cmd.Process.Pid)
-	}
-	p.cmd = nil
-	p.playing = -1
-}
-
-func setVolume(v int) {
-	vol := v * 190 / 100
-	if vol > 190 {
-		vol = 190
-	}
-	_ = exec.Command("/usr/bin/amixer", "sset", "DAC",
-		fmt.Sprintf("%d", vol)).Run()
-}
-
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--yunting-stream" {
+		if len(os.Args) != 4 {
+			fmt.Fprintln(os.Stderr, "radio: invalid streaming arguments")
+			os.Exit(2)
+		}
+		debug.SetMemoryLimit(12 << 20)
+		debug.SetGCPercent(50)
+		if err := streamYunting(context.Background(), os.Args[2], os.Args[3], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "radio: Yunting:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "radio:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	debug.SetMemoryLimit(12 << 20)
 	debug.SetGCPercent(50)
 
 	face, err := c1device.NewBitmapFace(fontData, 16)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "radio: font:", err)
-		os.Exit(1)
+		return fmt.Errorf("font: %w", err)
 	}
 	defer face.Close()
 
+	restoreRefresh, err := saveRefreshMode()
+	if err != nil {
+		return err
+	}
+	defer restoreRefresh()
 	platform, err := c1device.OpenPlatform()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "radio: open platform:", err)
-		os.Exit(1)
+		return fmt.Errorf("open platform: %w", err)
 	}
 	defer platform.Close()
 
+	originalDAC, err := readDAC()
+	if err != nil {
+		return fmt.Errorf("read DAC: %w", err)
+	}
+	defer func() { _ = setDAC(originalDAC) }()
 	volume := 32
-	setVolume(volume)
+	if err := setVolume(volume); err != nil {
+		return err
+	}
 
-	var p player
+	p := newPlayer(startPlayback)
+	defer p.stop()
 	sel, first := 0, 0
 	dirty := true
 	last := time.Now()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
 
 	draw := func() {
 		frame := render(face, sel, first, volume, &p)
-		_ = platform.Draw(frame, true)
+		if err := platform.Draw(frame, true); err != nil {
+			fmt.Fprintln(os.Stderr, "radio: draw:", err)
+		}
 		dirty = false
 		last = time.Now()
 	}
@@ -101,10 +83,12 @@ func main() {
 
 	for {
 		select {
+		case update := <-p.events():
+			p.update(update)
+			dirty = true
 		case ev, ok := <-platform.Events():
 			if !ok {
-				p.stop()
-				return
+				return nil
 			}
 			switch ev.Key {
 			case c1device.KeyUp:
@@ -118,25 +102,28 @@ func main() {
 					first = sel - listRows + 1
 				}
 			case c1device.KeyOK:
-				p.toggle(sel)
+				if !ev.Repeat {
+					p.toggle(sel)
+				}
 			case c1device.KeyLeft, c1device.KeyVolumeDown:
 				volume = clamp(volume-8, 0, 100)
-				setVolume(volume)
+				if err := setVolume(volume); err != nil {
+					p.note = "音量设置失败"
+				}
 			case c1device.KeyRight, c1device.KeyVolumeUp:
 				volume = clamp(volume+8, 0, 100)
-				setVolume(volume)
+				if err := setVolume(volume); err != nil {
+					p.note = "音量设置失败"
+				}
 			case c1device.KeyBack:
-				p.stop()
-				return
+				return nil
 			case c1device.KeyRune:
 				if ev.Rune == 'q' || ev.Rune == 'Q' {
-					p.stop()
-					return
+					return nil
 				}
 			}
 			dirty = true
-		case <-time.After(500 * time.Millisecond):
-			// 播放状态可能由后台 goroutine 改变；低频刷新。
+		case <-ticker.C:
 			if dirty || time.Since(last) > 2*time.Second {
 				draw()
 			}

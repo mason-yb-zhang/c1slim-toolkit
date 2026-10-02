@@ -14,13 +14,9 @@ adb shell "mkdir -p $APPS/zork/bin $APPS/zork/share"
 adb push zork-pkg/bin-dfrotz "$APPS/zork/bin/dfrotz"
 adb push zork-pkg/share/zork1.z3 "$APPS/zork/share/zork1.z3"
 
-cat > play.sh <<'EOF'
-#!/bin/sh
-exec /storage/c1/local-apps/apps/zork/bin/dfrotz /storage/c1/local-apps/apps/zork/share/zork1.z3
-EOF
 adb push play.sh "$APPS/zork/bin/play.sh"
 
-# 清单：executable 为打过 r2 补丁的 c1term；按 docs/device-quirks.md 第 3 条补 ELF 头
+# 清单入口使用现有 c1apprun 二进制的实际 SHA256，禁止修改 ELF 架构标记。
 cat > 06-zork.json <<'EOF'
 {
   "id": "zork",

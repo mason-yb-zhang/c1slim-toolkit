@@ -9,8 +9,7 @@
 ## 2. 本地应用（local-apps）启动器的隐性契约
 从 local-launcher 二进制字符串 + 实测还原：
 - manifest JSON 字段：`id` / `name` / `executable` / `sha256` / 可选 `environment`。
-- `executable` 必须是**真 MIPS ELF 二进制**（校验 ELF 头、MIPS 小端、o32、
-  且 ISA 需 MIPS32r2——Go 默认产 r1 头，见下）；**shell 脚本会被拒**（"需要MIPS小端o32 ELF程序"）。
+- `executable` 必须是**真 MIPS ELF 二进制**，检查小端、o32 和实际启动器支持的 ISA。不能仅凭 CPU 是 r2 就要求所有应用伪装成 r2。**shell 脚本会被拒**（"需要MIPS小端o32 ELF程序"）。
 - 可执行文件必须在可信存储内（`/storage/c1/` 前缀），拒绝符号链接，
   要求可执行位、不可被组/其他用户写、sha256 与清单一致（"程序SHA256不匹配，已拒绝启动"）。
 - 启动器**自己持有 C1ancher 外部应用租约**（flock `/dev/shm/c1ancher-external-app.runlock`
@@ -20,8 +19,8 @@
 
 ## 3. Go 交叉编译的 ELF 头是 MIPS32r1
 - `GOARCH=mipsle` 产物 e_flags 的 ISA 域是 MIPS32r1（0x5），而设备 CPU 是 XBurst r2。
-- 代码能跑（r1 指令集是 r2 子集），但过启动器校验需 r2：把 e_flags 的 ISA 域改为 0x7。
-- 本仓库 `tools/` 中各构建脚本均含此补丁步骤（读 ELF 头偏移 36 的 u32，改高 nibble）。
+- 必须保留编译器生成的 ELF 标记，修改 `e_flags` 不会改变实际机器指令或 ABI。
+- 使用 `GOOS=linux GOARCH=mipsle GOMIPS=hardfloat CGO_ENABLED=0` 构建，再核对真实 ELF、启动器校验和设备运行结果。若启动器拒绝兼容产物，应核对其校验规则，不修改二进制头来绕过。
 
 ## 4. 墨水屏帧格式
 - 296×152，1bit，按 8 像素横条打包：`byte[(y/8)*296 + x]` 的第 `0x80>>(y&7)` 位，黑=1。
@@ -32,8 +31,9 @@
 ## 5. 音频
 - 放音：`aplay -D hw:0,0 -f S16_LE -r <rate> -c <ch> -t raw`（Pinao 同款参数加
   `-B 20000 -R 0 -T 500000`）。
-- 音量：`amixer sset DAC 0..190`（默认 191≈100%，调试建议调低）。
-- 设备自带 curl 8.4（OpenSSL）可直连 HTTPS 流。
+- 音量：本设备 `amixer sget DAC` 实测范围为 0..190，每级约 0.5 dB；把应用百分比直接线性映射到该范围会使中低档非常小声。应用应保存进入时的 DAC 值，退出后恢复。
+- 2026-10-02 实测 `/etc/ssl/certs` 为空，curl 请求中国之声 HTTPS 流报错误 60。使用 curl 官方 Mozilla CA 包并指定 `--cacert` 后返回 HTTP 200 和音频数据；不要使用 `-k` 关闭验证。
+- 设备原生 FFmpeg 的 ALSA `default` 输出已通过静音探测，PCM 为 RUNNING，播放期间 Speaker Enable 自动打开。空闲时 Speaker Enable 为 off 本身不是故障证据。
 
 ## 6. 电子纸/全刷参数
 - `/sys/devices/platform/e0266a128/epaper/fast_refresh_only`、`refresh_max` 可临时调节，
