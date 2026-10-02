@@ -12,6 +12,7 @@
 | `c1dec/` | MP3 流解码桥（minimp3）：stdin 进 MP3 字节，解码后自动拉起 `aplay` 播放。配合 `curl` 一条命令播网络电台。 |
 | `tools/` | 三个 Python 工具：`gen_lvm.py`（合成文曲星 LavaX 的 LVM.bin 字体）、`gen_cjk_go.py`（生成 C1Terminal 的 CJK 字表）、`frame2png.py`（屏幕帧转 PNG，电脑上"截图"）。 |
 | `patches/` | 对 C1-Slim-Ports 的补丁：C1Terminal 中文显示/帧转储/C1TERM_EXEC、vt10x 宽字符、C1LavaX HOME 键退出（含调试追踪开关说明）。 |
+| `games/` | 游戏部署集：Zork / Jigsaw / 侠客行 MUD / 魔法纪元 / 三国 / 回形针宇宙——拉取与构建脚本、启动脚本、清单模板（游戏二进制由脚本从公开源获取，不入库）。 |
 | `docs/` | `device-quirks.md` 设备怪癖实录（musl pipe 返回值、启动器契约、ELF r1/r2、帧格式、音频、全刷参数）。 |
 
 ## 快速开始（网络收音机）
